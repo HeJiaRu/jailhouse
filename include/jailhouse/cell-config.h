@@ -50,7 +50,7 @@
  * Incremented on any layout or semantic change of system or cell config.
  * Also update HEADER_REVISION in tools.
  */
-#define JAILHOUSE_CONFIG_REVISION	10
+#define JAILHOUSE_CONFIG_REVISION	12
 
 #define JAILHOUSE_CELL_NAME_MAXLEN	31
 
@@ -92,9 +92,10 @@ struct jailhouse_cell_desc {
 	__u32 num_memory_regions;
 	__u32 num_cache_regions;
 	__u32 num_irqchips;
-	__u32 pio_bitmap_size;
+	__u32 num_pio_regions;
 	__u32 num_pci_devices;
 	__u32 num_pci_caps;
+	__u32 num_stream_ids;
 
 	__u32 vpci_irq_base;
 
@@ -112,7 +113,8 @@ struct jailhouse_cell_desc {
 #define JAILHOUSE_MEM_COMM_REGION	0x0020
 #define JAILHOUSE_MEM_LOADABLE		0x0040
 #define JAILHOUSE_MEM_ROOTSHARED	0x0080
-#define JAILHOUSE_MEM_IO_UNALIGNED	0x0100
+#define JAILHOUSE_MEM_NO_HUGEPAGES	0x0100
+#define JAILHOUSE_MEM_IO_UNALIGNED	0x8000
 #define JAILHOUSE_MEM_IO_WIDTH_SHIFT	16 /* uses bits 16..19 */
 #define JAILHOUSE_MEM_IO_8		(1 << JAILHOUSE_MEM_IO_WIDTH_SHIFT)
 #define JAILHOUSE_MEM_IO_16		(2 << JAILHOUSE_MEM_IO_WIDTH_SHIFT)
@@ -126,8 +128,31 @@ struct jailhouse_memory {
 	__u64 flags;
 } __attribute__((packed));
 
+#define JAILHOUSE_SHMEM_NET_REGIONS(start, dev_id)			\
+	{								\
+		.phys_start = start,					\
+		.virt_start = start,					\
+		.size = 0x1000,						\
+		.flags = JAILHOUSE_MEM_READ | JAILHOUSE_MEM_ROOTSHARED,	\
+	},								\
+	{ 0 },								\
+	{								\
+		.phys_start = (start) + 0x1000,				\
+		.virt_start = (start) + 0x1000,				\
+		.size = 0x7f000,					\
+		.flags = JAILHOUSE_MEM_READ | JAILHOUSE_MEM_ROOTSHARED | \
+			((dev_id == 0) ? JAILHOUSE_MEM_WRITE : 0),	\
+	},								\
+	{								\
+		.phys_start = (start) + 0x80000,			\
+		.virt_start = (start) + 0x80000,			\
+		.size = 0x7f000,					\
+		.flags = JAILHOUSE_MEM_READ | JAILHOUSE_MEM_ROOTSHARED | \
+			((dev_id == 1) ? JAILHOUSE_MEM_WRITE : 0),	\
+	}
+
 #define JAILHOUSE_MEMORY_IS_SUBPAGE(mem)	\
-	((mem)->virt_start & ~PAGE_MASK || (mem)->size & ~PAGE_MASK)
+	((mem)->virt_start & PAGE_OFFS_MASK || (mem)->size & PAGE_OFFS_MASK)
 
 #define JAILHOUSE_CACHE_L3_CODE		0x01
 #define JAILHOUSE_CACHE_L3_DATA		0x02
@@ -155,9 +180,15 @@ struct jailhouse_irqchip {
 #define JAILHOUSE_PCI_TYPE_BRIDGE	0x02
 #define JAILHOUSE_PCI_TYPE_IVSHMEM	0x03
 
-#define JAILHOUSE_SHMEM_PROTO_UNDEFINED	0x0000
-#define JAILHOUSE_SHMEM_PROTO_VETH	0x0100
-#define JAILHOUSE_SHMEM_PROTO_CUSTOM	0x8000	/* 0x80xx..0xffxx */
+#define JAILHOUSE_SHMEM_PROTO_UNDEFINED		0x0000
+#define JAILHOUSE_SHMEM_PROTO_VETH		0x0001
+#define JAILHOUSE_SHMEM_PROTO_CUSTOM		0x4000	/* 0x4000..0x7fff */
+#define JAILHOUSE_SHMEM_PROTO_VIRTIO_FRONT	0x8000	/* 0x8000..0xbfff */
+#define JAILHOUSE_SHMEM_PROTO_VIRTIO_BACK	0xc000	/* 0xc000..0xffff */
+
+#define VIRTIO_DEV_NET				1
+#define VIRTIO_DEV_BLOCK			2
+#define VIRTIO_DEV_CONSOLE			3
 
 struct jailhouse_pci_device {
 	__u8 type;
@@ -173,12 +204,27 @@ struct jailhouse_pci_device {
 	__u16 num_msix_vectors;
 	__u16 msix_region_size;
 	__u64 msix_address;
-	/** Memory region index of virtual shared memory device. */
-	__u32 shmem_region;
-	/** PCI subclass and interface ID of virtual shared memory device. */
+	/** First memory region index of shared memory device. */
+	__u32 shmem_regions_start;
+	/** ID of shared memory device (0..shmem_peers-1). */
+	__u8 shmem_dev_id;
+	/** Maximum number of peers connected via this shared memory device. */
+	__u8 shmem_peers;
+	/** PCI subclass and interface ID of shared memory device. */
 	__u16 shmem_protocol;
-	__u8 padding[2];
 } __attribute__((packed));
+
+#define JAILHOUSE_IVSHMEM_BAR_MASK_INTX			\
+	{						\
+		0xfffff000, 0x00000000, 0x00000000,	\
+		0x00000000, 0x00000000, 0x00000000,	\
+	}
+
+#define JAILHOUSE_IVSHMEM_BAR_MASK_MSIX			\
+	{						\
+		0xfffff000, 0xfffffe00, 0x00000000,	\
+		0x00000000, 0x00000000, 0x00000000,	\
+	}
 
 #define JAILHOUSE_PCI_EXT_CAP		0x8000
 
@@ -197,14 +243,41 @@ struct jailhouse_pci_capability {
 
 #define JAILHOUSE_MAX_IOMMU_UNITS	8
 
+#define JAILHOUSE_IOMMU_AMD		1
+#define JAILHOUSE_IOMMU_INTEL		2
+#define JAILHOUSE_IOMMU_SMMUV3		3
+#define JAILHOUSE_IOMMU_PVU		4
+
 struct jailhouse_iommu {
+	__u32 type;
 	__u64 base;
 	__u32 size;
-	__u16 amd_bdf;
-	__u8 amd_base_cap;
-	__u8 amd_msi_cap;
-	__u32 amd_features;
+
+	union {
+		struct {
+			__u16 bdf;
+			__u8 base_cap;
+			__u8 msi_cap;
+			__u32 features;
+		} __attribute__((packed)) amd;
+
+		struct {
+			__u64 tlb_base;
+			__u32 tlb_size;
+		} __attribute__((packed)) tipvu;
+	};
 } __attribute__((packed));
+
+struct jailhouse_pio {
+	__u16 base;
+	__u16 length;
+} __attribute__((packed));
+
+#define PIO_RANGE(__base, __length)	\
+	{				\
+		.base = __base,		\
+		.length = __length,	\
+	}
 
 #define JAILHOUSE_SYSTEM_SIGNATURE	"JHSYST"
 
@@ -252,6 +325,8 @@ struct jailhouse_system {
 				u64 gich_base;
 				u64 gicv_base;
 				u64 gicr_base;
+				struct jailhouse_iommu
+					iommu_units[JAILHOUSE_MAX_IOMMU_UNITS];
 			} __attribute__((packed)) arm;
 		} __attribute__((packed));
 	} __attribute__((packed)) platform_info;
@@ -266,9 +341,10 @@ jailhouse_cell_config_size(struct jailhouse_cell_desc *cell)
 		cell->num_memory_regions * sizeof(struct jailhouse_memory) +
 		cell->num_cache_regions * sizeof(struct jailhouse_cache) +
 		cell->num_irqchips * sizeof(struct jailhouse_irqchip) +
-		cell->pio_bitmap_size +
+		cell->num_pio_regions * sizeof(struct jailhouse_pio) +
 		cell->num_pci_devices * sizeof(struct jailhouse_pci_device) +
-		cell->num_pci_caps * sizeof(struct jailhouse_pci_capability);
+		cell->num_pci_caps * sizeof(struct jailhouse_pci_capability) +
+		cell->num_stream_ids * sizeof(__u32);
 }
 
 static inline __u32
@@ -308,10 +384,11 @@ jailhouse_cell_irqchips(const struct jailhouse_cell_desc *cell)
 		 cell->num_cache_regions * sizeof(struct jailhouse_cache));
 }
 
-static inline const __u8 *
-jailhouse_cell_pio_bitmap(const struct jailhouse_cell_desc *cell)
+static inline const struct jailhouse_pio *
+jailhouse_cell_pio(const struct jailhouse_cell_desc *cell)
 {
-	return (const __u8 *)((void *)jailhouse_cell_irqchips(cell) +
+	return (const struct jailhouse_pio *)
+		((void *)jailhouse_cell_irqchips(cell) +
 		cell->num_irqchips * sizeof(struct jailhouse_irqchip));
 }
 
@@ -319,8 +396,8 @@ static inline const struct jailhouse_pci_device *
 jailhouse_cell_pci_devices(const struct jailhouse_cell_desc *cell)
 {
 	return (const struct jailhouse_pci_device *)
-		((void *)jailhouse_cell_pio_bitmap(cell) +
-		 cell->pio_bitmap_size);
+		((void *)jailhouse_cell_pio(cell) +
+		 cell->num_pio_regions * sizeof(struct jailhouse_pio));
 }
 
 static inline const struct jailhouse_pci_capability *
@@ -329,6 +406,13 @@ jailhouse_cell_pci_caps(const struct jailhouse_cell_desc *cell)
 	return (const struct jailhouse_pci_capability *)
 		((void *)jailhouse_cell_pci_devices(cell) +
 		 cell->num_pci_devices * sizeof(struct jailhouse_pci_device));
+}
+
+static inline const __u32 *
+jailhouse_cell_stream_ids(const struct jailhouse_cell_desc *cell)
+{
+	return (const __u32 *)((void *)jailhouse_cell_pci_caps(cell) +
+		cell->num_pci_caps * sizeof(struct jailhouse_pci_capability));
 }
 
 #endif /* !_JAILHOUSE_CELL_CONFIG_H */

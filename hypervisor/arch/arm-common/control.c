@@ -16,6 +16,7 @@
 #include <jailhouse/printk.h>
 #include <asm/control.h>
 #include <asm/psci.h>
+#include <asm/iommu.h>
 
 static void enter_cpu_off(struct public_per_cpu *cpu_public)
 {
@@ -167,6 +168,7 @@ void arch_cell_reset(struct cell *cell)
 	comm_region->gicd_base = system_config->platform_info.arm.gicd_base;
 	comm_region->gicc_base = system_config->platform_info.arm.gicc_base;
 	comm_region->gicr_base = system_config->platform_info.arm.gicr_base;
+	comm_region->vpci_irq_base = cell->config->vpci_irq_base;
 
 	/*
 	 * All CPUs but the first are initially suspended.  The first CPU
@@ -209,6 +211,7 @@ void arch_flush_cell_vcpu_caches(struct cell *cell)
 void arch_config_commit(struct cell *cell_added_removed)
 {
 	irqchip_config_commit(cell_added_removed);
+	iommu_config_commit(cell_added_removed);
 }
 
 void __attribute__((noreturn)) arch_panic_stop(void)

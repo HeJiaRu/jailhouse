@@ -43,7 +43,9 @@ typedef long gcov_type;
 typedef long long gcov_type;
 #endif
 
-#if (__GNUC__ > 5) || (__GNUC__ == 5 && __GNUC_MINOR__ >= 1)
+#if (__GNUC__ >= 7)
+#define GCOV_COUNTERS			9
+#elif (__GNUC__ > 5) || (__GNUC__ == 5 && __GNUC_MINOR__ >= 1)
 #define GCOV_COUNTERS			10
 #elif __GNUC__ == 4 && __GNUC_MINOR__ >= 9
 #define GCOV_COUNTERS			9
@@ -186,7 +188,8 @@ int main(int argc, char **argv)
 	assert(count == hypervisor_size);
 
 	header = (struct jailhouse_header *)hypervisor;
-	if (strcmp(header->signature, JAILHOUSE_SIGNATURE)) {
+	if (memcmp(header->signature, JAILHOUSE_SIGNATURE,
+		   sizeof(header->signature))) {
 		errno = EINVAL;
 		error(0, 0, "%s does not seem to be a hypervisor image",
 		      filename);

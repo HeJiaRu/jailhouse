@@ -137,7 +137,7 @@ static void set_svm_segment_from_segment(struct svm_segment *svm_segment,
 
 static void svm_set_cell_config(struct cell *cell, struct vmcb *vmcb)
 {
-	vmcb->iopm_base_pa = paging_hvirt2phys(cell->arch.svm.iopm);
+	vmcb->iopm_base_pa = paging_hvirt2phys(cell->arch.io_bitmap);
 	vmcb->n_cr3 =
 		paging_hvirt2phys(cell->arch.svm.npt_iommu_structs.root_table);
 }
@@ -320,13 +320,7 @@ int vcpu_vendor_early_init(void)
 
 int vcpu_vendor_cell_init(struct cell *cell)
 {
-	int err = -ENOMEM;
 	u64 flags;
-
-	/* allocate iopm  */
-	cell->arch.svm.iopm = page_alloc(&mem_pool, IOPM_PAGES);
-	if (!cell->arch.svm.iopm)
-		return err;
 
 	/* build root NPT of cell */
 	cell->arch.svm.npt_iommu_structs.root_paging = npt_iommu_paging;
@@ -338,51 +332,45 @@ int vcpu_vendor_cell_init(struct cell *cell)
 		 * Map xAPIC as is; reads are passed, writes are trapped.
 		 */
 		flags = PAGE_READONLY_FLAGS | PAGE_FLAG_US | PAGE_FLAG_DEVICE;
-		err = paging_create(&cell->arch.svm.npt_iommu_structs,
-				    XAPIC_BASE, PAGE_SIZE, XAPIC_BASE,
-				    flags, PAGING_NON_COHERENT);
+		return paging_create(&cell->arch.svm.npt_iommu_structs,
+				     XAPIC_BASE, PAGE_SIZE, XAPIC_BASE, flags,
+				     PAGING_NON_COHERENT | PAGING_NO_HUGE);
 	} else {
 		flags = PAGE_DEFAULT_FLAGS | PAGE_FLAG_DEVICE;
-		err = paging_create(&cell->arch.svm.npt_iommu_structs,
-				    paging_hvirt2phys(avic_page),
-				    PAGE_SIZE, XAPIC_BASE,
-				    flags, PAGING_NON_COHERENT);
+		return paging_create(&cell->arch.svm.npt_iommu_structs,
+				     paging_hvirt2phys(avic_page),
+				     PAGE_SIZE, XAPIC_BASE, flags,
+				     PAGING_NON_COHERENT | PAGING_NO_HUGE);
 	}
-	if (err)
-		goto err_free_iopm;
-
-	return 0;
-
-err_free_iopm:
-	page_free(&mem_pool, cell->arch.svm.iopm, 3);
-
-	return err;
 }
 
 int vcpu_map_memory_region(struct cell *cell,
 			   const struct jailhouse_memory *mem)
 {
 	u64 phys_start = mem->phys_start;
-	u64 flags = PAGE_FLAG_US; /* See APMv2, Section 15.25.5 */
+	u64 access_flags = PAGE_FLAG_US; /* See APMv2, Section 15.25.5 */
+	u64 paging_flags = PAGING_COHERENT | PAGING_HUGE;
 
 	if (mem->flags & JAILHOUSE_MEM_READ)
-		flags |= PAGE_FLAG_PRESENT;
+		access_flags |= PAGE_FLAG_PRESENT;
 	if (mem->flags & JAILHOUSE_MEM_WRITE)
-		flags |= PAGE_FLAG_RW;
+		access_flags |= PAGE_FLAG_RW;
 	if (!(mem->flags & JAILHOUSE_MEM_EXECUTE))
-		flags |= PAGE_FLAG_NOEXECUTE;
+		access_flags |= PAGE_FLAG_NOEXECUTE;
 	if (mem->flags & JAILHOUSE_MEM_COMM_REGION)
 		phys_start = paging_hvirt2phys(&cell->comm_page);
+	if (mem->flags & JAILHOUSE_MEM_NO_HUGEPAGES)
+		paging_flags &= ~PAGING_HUGE;
 
-	flags |= amd_iommu_get_memory_region_flags(mem);
+	access_flags |= amd_iommu_get_memory_region_flags(mem);
 
 	/*
 	 * As we also manipulate the IOMMU page table, changes need to be
 	 * coherent.
 	 */
 	return paging_create(&cell->arch.svm.npt_iommu_structs, phys_start,
-			     mem->size, mem->virt_start, flags,
-			     PAGING_COHERENT);
+			     mem->size, mem->virt_start, access_flags,
+			     paging_flags);
 }
 
 int vcpu_unmap_memory_region(struct cell *cell,
@@ -396,7 +384,6 @@ void vcpu_vendor_cell_exit(struct cell *cell)
 {
 	paging_destroy(&cell->arch.svm.npt_iommu_structs, XAPIC_BASE,
 		       PAGE_SIZE, PAGING_NON_COHERENT);
-	page_free(&mem_pool, cell->arch.svm.iopm, 3);
 }
 
 int vcpu_init(struct per_cpu *cpu_data)
@@ -1023,11 +1010,9 @@ const u8 *vcpu_get_inst_bytes(const struct guest_paging_structures *pg_structs,
 	}
 }
 
-void vcpu_vendor_get_cell_io_bitmap(struct cell *cell,
-		                    struct vcpu_io_bitmap *iobm)
+unsigned int vcpu_vendor_get_io_bitmap_pages(void)
 {
-	iobm->data = cell->arch.svm.iopm;
-	iobm->size = IOPM_PAGES * PAGE_SIZE;
+	return IOPM_PAGES;
 }
 
 #define VCPU_VENDOR_GET_REGISTER(__reg__)	\
