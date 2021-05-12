@@ -68,7 +68,7 @@ struct {
 				JAILHOUSE_MEM_IO,
 		},
 		/* RAM */ {
-			.phys_start = 0x7bfe0000,
+			.phys_start = 0x7bef0000,
 			.virt_start = 0,
 			.size = 0x00010000,
 			.flags = JAILHOUSE_MEM_READ | JAILHOUSE_MEM_WRITE |
